@@ -3,6 +3,8 @@ import { Link, useParams } from "react-router-dom";
 import Layout from "@/components/Layout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { CheckCircle2, AlertCircle, Heart, ArrowLeft } from "lucide-react";
@@ -25,6 +27,10 @@ const RegisterServicePage = () => {
   const [loading, setLoading] = useState(true);
   const [segmentStart, setSegmentStart] = useState<string | null>(null);
   const [segmentHistory, setSegmentHistory] = useState<string[]>([]);
+  const [questionnaireMeta, setQuestionnaireMeta] = useState<{ title: string; description: string | null; cover_image_url: string | null; consent_enabled: boolean; consent_statement: string | null; consent_link_text: string | null; consent_body: string | null } | null>(null);
+  const [coverDismissed, setCoverDismissed] = useState(false);
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  const [showConsentDoc, setShowConsentDoc] = useState(false);
 
   useEffect(() => {
     if (!serviceId) return;
@@ -38,13 +44,16 @@ const RegisterServicePage = () => {
 
       const { data: q } = await supabase
         .from("questionnaires")
-        .select("id")
+        .select("id, title, description, cover_image_url, consent_enabled, consent_statement, consent_link_text, consent_body")
         .eq("service_id", serviceId)
         .eq("is_active", true)
         .maybeSingle();
 
       if (q) {
         setQuestionnaireId(q.id);
+        if (q.title || q.description || q.cover_image_url || q.consent_enabled) {
+          setQuestionnaireMeta({ title: q.title, description: q.description ?? null, cover_image_url: q.cover_image_url ?? null, consent_enabled: !!q.consent_enabled, consent_statement: q.consent_statement ?? null, consent_link_text: q.consent_link_text ?? null, consent_body: q.consent_body ?? null });
+        }
         const { data: qs } = await supabase
           .from("questions")
           .select("*, question_options(*)")
@@ -57,18 +66,25 @@ const RegisterServicePage = () => {
   }, [serviceId]);
 
   const hasJumpLogic = questions.some((q) => q.jump_logic?.enabled);
+  const hasSectionCover = questions.some((q) => q.type === "section_cover");
+  const useSegments = hasJumpLogic || hasSectionCover;
 
   const buildSegment = (startId: string | null): Question[] => {
     if (!startId) return [];
     const startIdx = questions.findIndex((q) => q.id === startId);
     if (startIdx === -1) return [];
+    if (questions[startIdx].type === "section_cover") return [questions[startIdx]];
     const seg: Question[] = [];
     for (let i = startIdx; i < questions.length; i++) {
       seg.push(questions[i]);
       if (questions[i].jump_logic?.enabled) break;
+      if (i + 1 < questions.length && questions[i + 1].type === "section_cover") break;
     }
     return seg;
   };
+
+  const currentSegment = useSegments ? buildSegment(segmentStart) : questions;
+  const isSectionCoverSegment = currentSegment.length === 1 && currentSegment[0]?.type === "section_cover";
 
   const getNextQId = (q: Question, answer: AnswerState): string | null => {
     if (!q.jump_logic?.enabled) {
@@ -92,9 +108,22 @@ const RegisterServicePage = () => {
     const seg = buildSegment(segmentStart);
     for (const q of seg) {
       const a = answers[q.id] ?? {};
+      if (q.type === "section_cover") {
+        if (!a.acknowledged) { toast.error("请点击按钮后继续"); return; }
+        continue;
+      }
       if (q.is_required) {
         const empty = q.type === "multiple_choice" ? !(a.options?.length) : !a.value?.trim();
         if (empty) { toast.error(`请回答：${q.text}`); return; }
+      }
+      if (q.type === "text_display") {
+        let cfg = { button_enabled: false };
+        try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+        if (cfg.button_enabled && !a.acknowledged) {
+          toast.error(`请在「${q.text}」中点击按钮后继续`);
+          return;
+        }
+        continue;
       }
       const hintOpt = q.question_options.find((o: any) =>
         (o.hint_title || o.hint_body) &&
@@ -106,9 +135,7 @@ const RegisterServicePage = () => {
       }
     }
     const pivot = seg[seg.length - 1];
-    const nextStart = pivot?.jump_logic?.enabled
-      ? getNextQId(pivot, answers[pivot.id] ?? {})
-      : null;
+    const nextStart = pivot ? getNextQId(pivot, answers[pivot.id] ?? {}) : null;
     if (!nextStart) {
       handleSubmitQuestionnaire();
     } else {
@@ -140,6 +167,15 @@ const RegisterServicePage = () => {
         const selected = q.question_options.filter((o: any) =>
           q.type === "multiple_choice" ? a.options?.includes(o.value) : a.value === o.value
         );
+        if (q.type === "text_display") {
+          let cfg = { button_enabled: false };
+          try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+          if (cfg.button_enabled && !a?.acknowledged) {
+            toast.error(`请在「${q.text}」中点击按钮后继续`);
+            return;
+          }
+          continue;
+        }
         if (selected.some((o: any) => o.hint_title || o.hint_body) && !a.acknowledged) {
           toast.error(`请在「${q.text}」中点击"我了解并同意"后继续`);
           return;
@@ -278,7 +314,98 @@ const RegisterServicePage = () => {
 
       <section className="py-12">
         <div className="container max-w-3xl">
-          {step === 1 && (
+          {step === 1 && !coverDismissed && questionnaireMeta && (
+            <div className="overflow-hidden rounded-2xl border bg-card shadow-sm">
+              {questionnaireMeta.cover_image_url && (
+                <img
+                  src={questionnaireMeta.cover_image_url}
+                  alt=""
+                  className="w-full object-cover"
+                  style={{ aspectRatio: "5/1" }}
+                />
+              )}
+              <div className="px-8 pt-5 pb-10 md:px-16 md:pt-7 md:pb-12 space-y-4 text-center">
+                {questionnaireMeta.title && (
+                  <h1 className="font-display text-3xl font-bold leading-tight md:text-4xl">
+                    {questionnaireMeta.title}
+                  </h1>
+                )}
+                {questionnaireMeta.description && (
+                  <div
+                    className="prose prose-base max-w-2xl mx-auto text-left text-foreground/80"
+                    dangerouslySetInnerHTML={{ __html: questionnaireMeta.description }}
+                  />
+                )}
+                {questionnaireMeta.consent_enabled && (
+                  <div className="flex items-start gap-3 max-w-md mx-auto text-left">
+                    <Checkbox
+                      id="consent"
+                      checked={consentAccepted}
+                      onCheckedChange={(c) => setConsentAccepted(!!c)}
+                      className="mt-0.5 shrink-0"
+                    />
+                    <label htmlFor="consent" className="text-sm text-foreground/80 cursor-pointer leading-relaxed">
+                      {questionnaireMeta.consent_statement || "我已阅读并同意"}
+                      {questionnaireMeta.consent_link_text && (
+                        <>
+                          {" "}
+                          <button
+                            type="button"
+                            className="text-primary underline underline-offset-2 hover:text-primary/80"
+                            onClick={() => setShowConsentDoc(true)}
+                          >
+                            {questionnaireMeta.consent_link_text}
+                          </button>
+                        </>
+                      )}
+                    </label>
+                  </div>
+                )}
+                <div className="pt-2">
+                  <Button
+                    size="lg"
+                    className="rounded-full px-12"
+                    disabled={questionnaireMeta.consent_enabled && !consentAccepted}
+                    onClick={() => {
+                      if (questionnaireMeta.consent_enabled && !consentAccepted) {
+                        toast.error("请先勾选知情同意");
+                        return;
+                      }
+                      setCoverDismissed(true);
+                    }}
+                  >
+                    开始填写
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <Dialog open={showConsentDoc} onOpenChange={setShowConsentDoc}>
+            <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+              <DialogHeader>
+                <DialogTitle>{questionnaireMeta?.consent_link_text || "知情同意书"}</DialogTitle>
+              </DialogHeader>
+              <div className="overflow-y-auto flex-1 pr-1">
+                {questionnaireMeta?.consent_body ? (
+                  <div
+                    className="prose prose-sm max-w-none text-foreground/80"
+                    dangerouslySetInnerHTML={{ __html: questionnaireMeta.consent_body }}
+                  />
+                ) : (
+                  <p className="text-sm text-muted-foreground">暂无内容</p>
+                )}
+              </div>
+              <div className="border-t pt-4 flex justify-end gap-3">
+                <Button variant="outline" onClick={() => setShowConsentDoc(false)}>关闭</Button>
+                <Button onClick={() => { setConsentAccepted(true); setShowConsentDoc(false); }}>
+                  我已阅读，同意
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          {step === 1 && (coverDismissed || !questionnaireMeta) && (
             <Card>
               <CardHeader>
                 <CardTitle>第 1 步：个人信息</CardTitle>
@@ -288,7 +415,7 @@ const RegisterServicePage = () => {
                   defaultValues={personalInfo ?? undefined}
                   onSubmit={(data) => {
                     setPersonalInfo(data);
-                    if (hasJumpLogic && questions.length > 0) {
+                    if (useSegments && questions.length > 0) {
                       setSegmentStart(questions[0].id);
                       setSegmentHistory([]);
                     }
@@ -299,7 +426,39 @@ const RegisterServicePage = () => {
             </Card>
           )}
 
-          {step === 2 && (
+          {step === 2 && isSectionCoverSegment && (() => {
+            const q = currentSegment[0];
+            let cfg = { body: "", button_label: "" };
+            try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+            return (
+              <Card>
+                <CardContent className="py-12 text-center space-y-6">
+                  {q.text && <h2 className="font-display text-3xl font-bold">{q.text}</h2>}
+                  {cfg.body && (
+                    <div
+                      className="text-sm text-foreground/80 prose prose-sm max-w-2xl mx-auto text-left"
+                      dangerouslySetInnerHTML={{ __html: cfg.body }}
+                    />
+                  )}
+                  <div className="flex gap-3 justify-center pt-2">
+                    <Button variant="outline" className="rounded-full" onClick={handlePrevSegment}>上一步</Button>
+                    <Button className="rounded-full" onClick={() => {
+                      const updated = { ...answers, [q.id]: { acknowledged: true } };
+                      setAnswers(updated);
+                      const idx = questions.findIndex((x) => x.id === q.id);
+                      const nextId = idx < questions.length - 1 ? questions[idx + 1].id : null;
+                      if (!nextId) handleSubmitQuestionnaire();
+                      else { setSegmentHistory((h) => [...h, segmentStart!]); setSegmentStart(nextId); }
+                    }}>
+                      {cfg.button_label || "下一步"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
+
+          {step === 2 && !isSectionCoverSegment && (
             <Card>
               <CardHeader>
                 <CardTitle>第 2 步：问卷评估</CardTitle>
@@ -307,17 +466,8 @@ const RegisterServicePage = () => {
               <CardContent className="space-y-4">
                 {questions.length === 0 ? (
                   <p className="text-sm text-muted-foreground">本课程暂无入组问卷，可直接提交报名。</p>
-                ) : hasJumpLogic ? (
-                  buildSegment(segmentStart).map((q) => (
-                    <QuestionRenderer
-                      key={q.id}
-                      question={q}
-                      answer={answers[q.id] ?? {}}
-                      onChange={(a) => setAnswers((prev) => ({ ...prev, [q.id]: a }))}
-                    />
-                  ))
                 ) : (
-                  questions.map((q) => (
+                  currentSegment.map((q) => (
                     <QuestionRenderer
                       key={q.id}
                       question={q}
@@ -327,7 +477,7 @@ const RegisterServicePage = () => {
                   ))
                 )}
                 <div className="flex gap-3 pt-2">
-                  {hasJumpLogic ? (
+                  {useSegments ? (
                     <>
                       <Button variant="outline" className="rounded-full" onClick={handlePrevSegment}>上一步</Button>
                       <Button className="flex-1 rounded-full" disabled={submitting} onClick={handleNextSegment}>

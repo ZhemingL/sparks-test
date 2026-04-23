@@ -41,6 +41,14 @@ const AdminsManager = () => {
     load();
   };
 
+  const reject = async (userId: string, email: string) => {
+    if (!confirm(`确定拒绝并删除用户 ${email}？此操作不可撤销。`)) return;
+    const { error } = await supabase.rpc("reject_pending_user", { p_user_id: userId });
+    if (error) { toast.error(error.message); return; }
+    toast.success("已拒绝并删除该用户");
+    load();
+  };
+
   const revoke = async (userId: string) => {
     if (!confirm("确定撤销该管理员权限？")) return;
     const { error } = await supabase.from("user_roles").delete().eq("user_id", userId);
@@ -90,6 +98,9 @@ const AdminsManager = () => {
                       <Button size="sm" onClick={() => grant(u.id, "super_admin")}>
                         <ShieldCheck className="h-4 w-4 mr-1" /> 授权为超级管理员
                       </Button>
+                      <Button size="sm" variant="destructive" onClick={() => reject(u.id, u.email)}>
+                        <UserX className="h-4 w-4 mr-1" /> 拒绝
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -128,9 +139,11 @@ const AdminsManager = () => {
                     {new Date(a.granted_at).toLocaleString("zh-CN")}
                   </TableCell>
                   <TableCell className="text-right">
-                    <Button size="sm" variant="ghost" onClick={() => revoke(a.user_id)}>
-                      <UserX className="h-4 w-4 text-destructive" />
-                    </Button>
+                    {a.role !== "super_admin" && (
+                      <Button size="sm" variant="ghost" onClick={() => revoke(a.user_id)}>
+                        <UserX className="h-4 w-4 text-destructive" />
+                      </Button>
+                    )}
                   </TableCell>
                 </TableRow>
               ))}

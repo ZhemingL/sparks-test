@@ -15,12 +15,13 @@ export interface QuestionOption {
   allow_free_text: boolean;
   hint_title: string | null;
   hint_body: string | null;
+  hint_button: string | null;
   sort_order: number;
 }
 
 export interface Question {
   id: string;
-  type: "yes_no" | "single_choice" | "multiple_choice" | "text_input" | "personal_info" | "dropdown" | "likert";
+  type: "yes_no" | "single_choice" | "multiple_choice" | "text_input" | "personal_info" | "dropdown" | "likert" | "text_display" | "section_cover";
   text: string;
   is_required: boolean;
   hint_text: string | null;
@@ -44,8 +45,8 @@ interface Props {
 
 const QuestionRenderer = ({ question, answer, onChange }: Props) => {
   const fallbackYesNo: QuestionOption[] = [
-    { id: "_yes", label: "是", value: "yes", is_exclusion: false, allow_free_text: false, hint_title: null, hint_body: null, sort_order: 1 },
-    { id: "_no", label: "否", value: "no", is_exclusion: false, allow_free_text: false, hint_title: null, hint_body: null, sort_order: 2 },
+    { id: "_yes", label: "是", value: "yes", is_exclusion: false, allow_free_text: false, hint_title: null, hint_body: null, hint_button: null, sort_order: 1 },
+    { id: "_no", label: "否", value: "no", is_exclusion: false, allow_free_text: false, hint_title: null, hint_body: null, hint_button: null, sort_order: 2 },
   ];
   const sorted = question.type === "yes_no" && question.question_options.length === 0
     ? fallbackYesNo
@@ -182,6 +183,38 @@ const QuestionRenderer = ({ question, answer, onChange }: Props) => {
         );
       })()}
 
+      {question.type === "text_display" && (() => {
+        let cfg = { body: "", button_enabled: false, button_label: "" };
+        try { cfg = { ...cfg, ...JSON.parse(question.hint_text ?? "{}") }; } catch {}
+        return (
+          <div className="space-y-3">
+            {cfg.body && (
+              <div
+                className="text-sm text-foreground/80 prose prose-sm max-w-none"
+                dangerouslySetInnerHTML={{ __html: cfg.body }}
+              />
+            )}
+            {cfg.button_enabled && (
+              answer.acknowledged ? (
+                <div className="flex items-center gap-2 text-sm text-green-600">
+                  <CheckCircle2 className="h-4 w-4" />
+                  已确认
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => onChange({ ...answer, acknowledged: true })}
+                  className="rounded-full"
+                >
+                  {cfg.button_label || "我知道了"}
+                </Button>
+              )
+            )}
+          </div>
+        );
+      })()}
+
       {requiresAck && activeHintOpt && (
         <div className="rounded-md border border-primary/30 bg-primary/5 overflow-hidden">
           <div className="flex items-center gap-2 border-b border-primary/20 bg-primary/10 px-4 py-2">
@@ -209,7 +242,7 @@ const QuestionRenderer = ({ question, answer, onChange }: Props) => {
                 onClick={() => onChange({ ...answer, acknowledged: true })}
                 className="rounded-full"
               >
-                我了解并同意
+                {activeHintOpt.hint_button || "我了解并同意"}
               </Button>
             )}
           </div>

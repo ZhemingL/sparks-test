@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { LayoutDashboard, Package, ClipboardList, BarChart3, LogOut, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,18 @@ const navItems = [
 const AdminLayout = ({ children }: { children: React.ReactNode }) => {
   const navigate = useNavigate();
   const { isSuperAdmin } = useAdminAuth();
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    const fetchPending = async () => {
+      const { data } = await supabase.rpc("get_pending_users");
+      setPendingCount(data?.length ?? 0);
+    };
+    fetchPending();
+    const interval = setInterval(fetchPending, 60000);
+    return () => clearInterval(interval);
+  }, [isSuperAdmin]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -59,6 +72,9 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
             >
               <Users className="h-4 w-4" />
               管理员管理
+              {pendingCount > 0 && (
+                <span className="ml-auto h-2 w-2 rounded-full bg-red-500" />
+              )}
             </NavLink>
           )}
         </nav>
