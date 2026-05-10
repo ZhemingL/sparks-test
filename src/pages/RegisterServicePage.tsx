@@ -9,7 +9,10 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { CheckCircle2, AlertCircle, Heart, ArrowLeft } from "lucide-react";
 import PersonalInfoStep, { PersonalInfo } from "@/components/questionnaire/PersonalInfoStep";
-import QuestionRenderer, { Question, AnswerState } from "@/components/questionnaire/QuestionRenderer";
+import QuestionRenderer, { Question, AnswerState, PhoneInput } from "@/components/questionnaire/QuestionRenderer";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 type Step = 1 | 2 | 3;
 type Result = { kind: "approved"; registrationId: string } | { kind: "rejected"; reason: string };
@@ -27,10 +30,10 @@ const RegisterServicePage = () => {
   const [loading, setLoading] = useState(true);
   const [segmentStart, setSegmentStart] = useState<string | null>(null);
   const [segmentHistory, setSegmentHistory] = useState<string[]>([]);
-  const [questionnaireMeta, setQuestionnaireMeta] = useState<{ title: string; description: string | null; cover_image_url: string | null; consent_enabled: boolean; consent_statement: string | null; consent_link_text: string | null; consent_body: string | null } | null>(null);
+  const [questionnaireMeta, setQuestionnaireMeta] = useState<{ title: string; description: string | null; cover_image_url: string | null; consent_enabled: boolean; consent_items: { statement: string; body: string }[] } | null>(null);
   const [coverDismissed, setCoverDismissed] = useState(false);
-  const [consentAccepted, setConsentAccepted] = useState(false);
-  const [showConsentDoc, setShowConsentDoc] = useState(false);
+  const [consentAccepted, setConsentAccepted] = useState<Record<number, boolean>>({});
+  const [showConsentDoc, setShowConsentDoc] = useState<number | null>(null);
 
   useEffect(() => {
     if (!serviceId) return;
@@ -44,7 +47,7 @@ const RegisterServicePage = () => {
 
       const { data: q } = await supabase
         .from("questionnaires")
-        .select("id, title, description, cover_image_url, consent_enabled, consent_statement, consent_link_text, consent_body")
+        .select("id, title, description, cover_image_url, consent_enabled, consent_items, consent_statement, consent_body")
         .eq("service_id", serviceId)
         .eq("is_active", true)
         .maybeSingle();
@@ -52,7 +55,11 @@ const RegisterServicePage = () => {
       if (q) {
         setQuestionnaireId(q.id);
         if (q.title || q.description || q.cover_image_url || q.consent_enabled) {
-          setQuestionnaireMeta({ title: q.title, description: q.description ?? null, cover_image_url: q.cover_image_url ?? null, consent_enabled: !!q.consent_enabled, consent_statement: q.consent_statement ?? null, consent_link_text: q.consent_link_text ?? null, consent_body: q.consent_body ?? null });
+          const rawItems: { statement: string; body: string }[] = (q as any).consent_items ?? [];
+          const consentItems = rawItems.length === 0 && (q as any).consent_statement
+            ? [{ statement: (q as any).consent_statement ?? "", body: (q as any).consent_body ?? "" }]
+            : rawItems;
+          setQuestionnaireMeta({ title: q.title, description: q.description ?? null, cover_image_url: q.cover_image_url ?? null, consent_enabled: !!q.consent_enabled, consent_items: consentItems });
         }
         const { data: qs } = await supabase
           .from("questions")
@@ -67,24 +74,86 @@ const RegisterServicePage = () => {
 
   const hasJumpLogic = questions.some((q) => q.jump_logic?.enabled);
   const hasSectionCover = questions.some((q) => q.type === "section_cover");
-  const useSegments = hasJumpLogic || hasSectionCover;
+  const hasPersonalInfoQuestions = questions.some((q) => q.type === "personal_info" || q.type === "pii_field");
+  const hasPageBreaks = questions.some((q) => q.type === "page_break");
+
+  const piPageBreak = (q: Question) => {
+    if (q.type !== "personal_info") return false;
+    try { return !!JSON.parse(q.hint_text ?? "{}").page_break; } catch { return false; }
+  };
+
+  const hasPersonalInfoPages = questions.some(piPageBreak);
+  const useSegments = hasJumpLogic || hasSectionCover || hasPageBreaks || hasPersonalInfoPages;
+
+  const pageList = questions
+    .filter((q) => q.type === "page_break" || piPageBreak(q))
+    .map((q) => {
+      if (q.type === "page_break") return { id: q.id, title: q.text || "页面" };
+      let cfg = { page_break_title: "" };
+      try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+      return { id: q.id, title: cfg.page_break_title || q.text || "基础信息" };
+    });
+
+  useEffect(() => {
+    if (loading || step !== 1) return;
+    if (!hasPersonalInfoQuestions) return;
+    if (!coverDismissed && questionnaireMeta) return;
+    if (useSegments && questions.length > 0) { setSegmentStart(questions[0].id); setSegmentHistory([]); }
+    setStep(2);
+  }, [loading, step, coverDismissed, questionnaireMeta, hasPersonalInfoQuestions]);
+
+  const extractPersonalInfo = () => {
+    const info: Record<string, string> = { name: "", email: "", phone: "" };
+    for (const q of questions) {
+      const a = answers[q.id];
+      if (!a) continue;
+      if (q.type === "personal_info") {
+        try { Object.assign(info, JSON.parse(a.value ?? "{}")); } catch {}
+      }
+      if (q.type === "pii_field") {
+        let cfg = { field: "" };
+        try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+        if (cfg.field && a.value) info[cfg.field] = a.value;
+      }
+    }
+    return info;
+  };
 
   const buildSegment = (startId: string | null): Question[] => {
     if (!startId) return [];
-    const startIdx = questions.findIndex((q) => q.id === startId);
+    let startIdx = questions.findIndex((q) => q.id === startId);
     if (startIdx === -1) return [];
+    // page_break questions are transparent dividers — skip them
+    while (startIdx < questions.length && questions[startIdx].type === "page_break") startIdx++;
+    if (startIdx >= questions.length) return [];
     if (questions[startIdx].type === "section_cover") return [questions[startIdx]];
+    if (piPageBreak(questions[startIdx])) return [questions[startIdx]];
     const seg: Question[] = [];
     for (let i = startIdx; i < questions.length; i++) {
       seg.push(questions[i]);
       if (questions[i].jump_logic?.enabled) break;
-      if (i + 1 < questions.length && questions[i + 1].type === "section_cover") break;
+      const next = i + 1 < questions.length ? questions[i + 1] : null;
+      if (next && (["section_cover", "page_break"].includes(next.type) || piPageBreak(next))) break;
     }
     return seg;
   };
 
   const currentSegment = useSegments ? buildSegment(segmentStart) : questions;
   const isSectionCoverSegment = currentSegment.length === 1 && currentSegment[0]?.type === "section_cover";
+  const isPersonalInfoSegment = currentSegment.length === 1 && !!currentSegment[0] && piPageBreak(currentSegment[0]);
+
+  const currentPageIdx = (() => {
+    if (!useSegments || pageList.length === 0) return -1;
+    const firstQ = currentSegment[0];
+    if (!firstQ) return -1;
+    const firstIdx = questions.findIndex((q) => q.id === firstQ.id);
+    if (firstIdx === -1) return -1;
+    for (let i = firstIdx; i >= 0; i--) {
+      const idx = pageList.findIndex((p) => p.id === questions[i].id);
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  })();
 
   const getNextQId = (q: Question, answer: AnswerState): string | null => {
     if (!q.jump_logic?.enabled) {
@@ -125,6 +194,31 @@ const RegisterServicePage = () => {
         }
         continue;
       }
+      if (q.type === "consent") {
+        if (q.is_required && !a.acknowledged) {
+          toast.error(`请先勾选同意「${q.text || "协议"}」`);
+          return;
+        }
+        continue;
+      }
+      if (q.type === "personal_info") {
+        if (q.is_required) {
+          let data: Record<string, string> = {};
+          try { data = JSON.parse(a.value ?? "{}"); } catch {}
+          let cfg = { fields: ["name", "email", "phone"] };
+          try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+          const missing = cfg.fields.find((f) => !data[f]?.trim());
+          if (missing) { toast.error(`请在「${q.text || "基础信息"}」中填写所有必填项`); return; }
+        }
+        continue;
+      }
+      if (q.type === "pii_field") {
+        if (q.is_required && !a.value?.trim()) {
+          toast.error(`请填写：${q.text}`);
+          return;
+        }
+        continue;
+      }
       const hintOpt = q.question_options.find((o: any) =>
         (o.hint_title || o.hint_body) &&
         (q.type === "multiple_choice" ? a.options?.includes(o.value) : a.value === o.value)
@@ -135,7 +229,14 @@ const RegisterServicePage = () => {
       }
     }
     const pivot = seg[seg.length - 1];
-    const nextStart = pivot ? getNextQId(pivot, answers[pivot.id] ?? {}) : null;
+    let nextStart = pivot ? getNextQId(pivot, answers[pivot.id] ?? {}) : null;
+    // Skip bare page_break questions (personal_info with page_break handled as solo segment, not skipped)
+    while (nextStart) {
+      const nq = questions.find((q) => q.id === nextStart);
+      if (nq?.type !== "page_break") break;
+      const ni = questions.findIndex((q) => q.id === nextStart);
+      nextStart = ni < questions.length - 1 ? questions[ni + 1].id : null;
+    }
     if (!nextStart) {
       handleSubmitQuestionnaire();
     } else {
@@ -152,11 +253,13 @@ const RegisterServicePage = () => {
   };
 
   const handleSubmitQuestionnaire = async () => {
-    if (!personalInfo || !service) return;
+    if (!service) return;
+    if (!personalInfo && !hasPersonalInfoQuestions) { toast.error("请先填写个人信息"); return; }
 
     if (!hasJumpLogic) {
       for (const q of questions) {
         if (!q.is_required) continue;
+        if (["text_display", "section_cover", "consent", "page_break"].includes(q.type)) continue;
         const a = answers[q.id];
         const empty = !a || (q.type === "multiple_choice" ? !(a.options?.length) : !a.value?.trim());
         if (empty) { toast.error(`请回答：${q.text}`); return; }
@@ -176,6 +279,14 @@ const RegisterServicePage = () => {
           }
           continue;
         }
+        if (q.type === "consent") {
+          if (q.is_required && !a.acknowledged) {
+            toast.error(`请先勾选同意「${q.text || "协议"}」`);
+            return;
+          }
+          continue;
+        }
+        if (q.type === "personal_info" || q.type === "pii_field") continue;
         if (selected.some((o: any) => o.hint_title || o.hint_body) && !a.acknowledged) {
           toast.error(`请在「${q.text}」中点击"我了解并同意"后继续`);
           return;
@@ -200,11 +311,12 @@ const RegisterServicePage = () => {
 
     setSubmitting(true);
     try {
+      const regInfo = hasPersonalInfoQuestions ? extractPersonalInfo() : personalInfo ?? {};
       const status = exclusionReason ? "rejected" : "pending";
       const { data: reg, error: regErr } = await supabase
         .from("registrations")
         .insert({
-          ...personalInfo,
+          ...regInfo,
           service_id: service.id,
           status,
           rejection_reason: exclusionReason,
@@ -292,22 +404,37 @@ const RegisterServicePage = () => {
           <p className="mt-2 text-muted-foreground">报名前请完成简短的入组评估</p>
 
           {/* Stepper */}
-          <div className="mt-6 flex items-center gap-3">
-            {([1, 2, 3] as const).map((n, i) => (
-              <div key={n} className="flex items-center gap-3">
-                <div
-                  className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium ${
-                    step >= n ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
-                  }`}
-                >
-                  {n}
+          <div className="mt-6 flex items-center gap-3 flex-wrap">
+            {(() => {
+              const items: { label: string; active: boolean }[] = [];
+              if (pageList.length === 0) {
+                items.push(
+                  { label: "个人信息", active: step >= 1 },
+                  { label: "问卷评估", active: step >= 2 },
+                  { label: "提交结果", active: step >= 3 },
+                );
+              } else {
+                if (!hasPersonalInfoQuestions) items.push({ label: "个人信息", active: step >= 1 });
+                pageList.forEach((page, idx) => {
+                  items.push({
+                    label: page.title,
+                    active: step === 3 || (step === 2 && currentPageIdx >= idx),
+                  });
+                });
+                items.push({ label: "提交结果", active: step === 3 });
+              }
+              return items.map((item, i) => (
+                <div key={i} className="flex items-center gap-3">
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-full text-sm font-medium ${item.active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                    {i + 1}
+                  </div>
+                  <span className={`text-sm ${item.active ? "text-foreground" : "text-muted-foreground"}`}>
+                    {item.label}
+                  </span>
+                  {i < items.length - 1 && <div className="h-px w-8 bg-border" />}
                 </div>
-                <span className={`text-sm ${step >= n ? "text-foreground" : "text-muted-foreground"}`}>
-                  {n === 1 ? "个人信息" : n === 2 ? "问卷评估" : "提交结果"}
-                </span>
-                {i < 2 && <div className="h-px w-8 bg-border" />}
-              </div>
-            ))}
+              ));
+            })()}
           </div>
         </div>
       </section>
@@ -336,42 +463,40 @@ const RegisterServicePage = () => {
                     dangerouslySetInnerHTML={{ __html: questionnaireMeta.description }}
                   />
                 )}
-                {questionnaireMeta.consent_enabled && (
-                  <div className="flex items-start gap-3 max-w-md mx-auto text-left">
+                {questionnaireMeta.consent_enabled && questionnaireMeta.consent_items?.map((item, i) => (
+                  <div key={i} className="flex items-start gap-3 max-w-md mx-auto text-left">
                     <Checkbox
-                      id="consent"
-                      checked={consentAccepted}
-                      onCheckedChange={(c) => setConsentAccepted(!!c)}
+                      id={`consent-${i}`}
+                      checked={!!consentAccepted[i]}
+                      onCheckedChange={(c) => setConsentAccepted((prev) => ({ ...prev, [i]: !!c }))}
                       className="mt-0.5 shrink-0"
                     />
-                    <label htmlFor="consent" className="text-sm text-foreground/80 cursor-pointer leading-relaxed">
-                      {questionnaireMeta.consent_statement || "我已阅读并同意"}
-                      {questionnaireMeta.consent_link_text && (
-                        <>
-                          {" "}
-                          <button
-                            type="button"
-                            className="text-primary underline underline-offset-2 hover:text-primary/80"
-                            onClick={() => setShowConsentDoc(true)}
-                          >
-                            {questionnaireMeta.consent_link_text}
-                          </button>
-                        </>
-                      )}
-                    </label>
+                    <div
+                      className="text-sm text-foreground/80 prose prose-sm max-w-none leading-relaxed cursor-pointer"
+                      onClick={(e) => {
+                        const el = e.target as HTMLElement;
+                        if (el.tagName === "A" && el.getAttribute("href") === "#consent-doc") {
+                          e.preventDefault();
+                          setShowConsentDoc(i);
+                        }
+                      }}
+                      dangerouslySetInnerHTML={{ __html: item.statement || "我已阅读并同意" }}
+                    />
                   </div>
-                )}
+                ))}
                 <div className="pt-2">
                   <Button
                     size="lg"
                     className="rounded-full px-12"
-                    disabled={questionnaireMeta.consent_enabled && !consentAccepted}
+                    disabled={questionnaireMeta.consent_enabled && !questionnaireMeta.consent_items?.every((_, i) => consentAccepted[i])}
                     onClick={() => {
-                      if (questionnaireMeta.consent_enabled && !consentAccepted) {
-                        toast.error("请先勾选知情同意");
-                        return;
-                      }
+                      const allAccepted = !questionnaireMeta.consent_enabled || questionnaireMeta.consent_items?.every((_, i) => consentAccepted[i]);
+                      if (!allAccepted) { toast.error("请先勾选所有协议"); return; }
                       setCoverDismissed(true);
+                      if (hasPersonalInfoQuestions) {
+                        if (useSegments && questions.length > 0) { setSegmentStart(questions[0].id); setSegmentHistory([]); }
+                        setStep(2);
+                      }
                     }}
                   >
                     开始填写
@@ -381,31 +506,34 @@ const RegisterServicePage = () => {
             </div>
           )}
 
-          <Dialog open={showConsentDoc} onOpenChange={setShowConsentDoc}>
+          <Dialog open={showConsentDoc !== null} onOpenChange={(o) => { if (!o) setShowConsentDoc(null); }}>
             <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
               <DialogHeader>
-                <DialogTitle>{questionnaireMeta?.consent_link_text || "知情同意书"}</DialogTitle>
+                <DialogTitle>用户协议</DialogTitle>
               </DialogHeader>
               <div className="overflow-y-auto flex-1 pr-1">
-                {questionnaireMeta?.consent_body ? (
+                {showConsentDoc !== null && questionnaireMeta?.consent_items?.[showConsentDoc]?.body ? (
                   <div
                     className="prose prose-sm max-w-none text-foreground/80"
-                    dangerouslySetInnerHTML={{ __html: questionnaireMeta.consent_body }}
+                    dangerouslySetInnerHTML={{ __html: questionnaireMeta.consent_items[showConsentDoc].body }}
                   />
                 ) : (
                   <p className="text-sm text-muted-foreground">暂无内容</p>
                 )}
               </div>
               <div className="border-t pt-4 flex justify-end gap-3">
-                <Button variant="outline" onClick={() => setShowConsentDoc(false)}>关闭</Button>
-                <Button onClick={() => { setConsentAccepted(true); setShowConsentDoc(false); }}>
+                <Button variant="outline" onClick={() => setShowConsentDoc(null)}>关闭</Button>
+                <Button onClick={() => {
+                  if (showConsentDoc !== null) setConsentAccepted((prev) => ({ ...prev, [showConsentDoc]: true }));
+                  setShowConsentDoc(null);
+                }}>
                   我已阅读，同意
                 </Button>
               </div>
             </DialogContent>
           </Dialog>
 
-          {step === 1 && (coverDismissed || !questionnaireMeta) && (
+          {step === 1 && (coverDismissed || !questionnaireMeta) && !hasPersonalInfoQuestions && (
             <Card>
               <CardHeader>
                 <CardTitle>第 1 步：个人信息</CardTitle>
@@ -426,12 +554,16 @@ const RegisterServicePage = () => {
             </Card>
           )}
 
+
           {step === 2 && isSectionCoverSegment && (() => {
             const q = currentSegment[0];
-            let cfg = { body: "", button_label: "" };
+            let cfg = { body: "", button_label: "", banner_url: "" };
             try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
             return (
-              <Card>
+              <Card className="overflow-hidden">
+                {cfg.banner_url && (
+                  <img src={cfg.banner_url} alt="" className="w-full object-cover" style={{ aspectRatio: "5/1" }} />
+                )}
                 <CardContent className="py-12 text-center space-y-6">
                   {q.text && <h2 className="font-display text-3xl font-bold">{q.text}</h2>}
                   {cfg.body && (
@@ -446,7 +578,13 @@ const RegisterServicePage = () => {
                       const updated = { ...answers, [q.id]: { acknowledged: true } };
                       setAnswers(updated);
                       const idx = questions.findIndex((x) => x.id === q.id);
-                      const nextId = idx < questions.length - 1 ? questions[idx + 1].id : null;
+                      let nextId: string | null = idx < questions.length - 1 ? questions[idx + 1].id : null;
+                      while (nextId) {
+                        const nq = questions.find((x) => x.id === nextId);
+                        if (nq?.type !== "page_break") break;
+                        const ni = questions.findIndex((x) => x.id === nextId);
+                        nextId = ni < questions.length - 1 ? questions[ni + 1].id : null;
+                      }
                       if (!nextId) handleSubmitQuestionnaire();
                       else { setSegmentHistory((h) => [...h, segmentStart!]); setSegmentStart(nextId); }
                     }}>
@@ -458,10 +596,80 @@ const RegisterServicePage = () => {
             );
           })()}
 
-          {step === 2 && !isSectionCoverSegment && (
+          {step === 2 && isPersonalInfoSegment && (() => {
+            const q = currentSegment[0];
+            let cfg: { fields: string[]; page_break_title: string } = { fields: ["name", "email", "phone"], page_break_title: "" };
+            try { cfg = { ...cfg, ...JSON.parse(q.hint_text ?? "{}") }; } catch {}
+            const update = (field: string, val: string) => {
+              setAnswers((prev) => {
+                let d: Record<string, string> = {};
+                try { d = JSON.parse(prev[q.id]?.value ?? "{}"); } catch {}
+                return { ...prev, [q.id]: { ...prev[q.id], value: JSON.stringify({ ...d, [field]: val }) } };
+              });
+            };
+            let data: Record<string, string> = {};
+            try { data = JSON.parse(answers[q.id]?.value ?? "{}"); } catch {}
+            const stepLabel = currentPageIdx >= 0
+              ? `第 ${currentPageIdx + 1} 步：${pageList[currentPageIdx].title}`
+              : cfg.page_break_title || q.text || "基础信息";
+            return (
+              <Card>
+                <CardHeader><CardTitle>{stepLabel}</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  {cfg.fields.includes("name") && (
+                    <div className="space-y-1">
+                      <Label>姓名{q.is_required && <span className="text-destructive ml-1">*</span>}</Label>
+                      <Input value={data.name ?? ""} onChange={(e) => update("name", e.target.value)} placeholder="请填写姓名" />
+                    </div>
+                  )}
+                  {cfg.fields.includes("email") && (
+                    <div className="space-y-1">
+                      <Label>邮箱{q.is_required && <span className="text-destructive ml-1">*</span>}</Label>
+                      <Input type="email" value={data.email ?? ""} onChange={(e) => update("email", e.target.value)} placeholder="请填写邮箱" />
+                    </div>
+                  )}
+                  {cfg.fields.includes("phone") && (
+                    <div className="space-y-1">
+                      <Label>手机号码{q.is_required && <span className="text-destructive ml-1">*</span>}</Label>
+                      <PhoneInput value={data.phone ?? ""} onChange={(v) => update("phone", v)} />
+                    </div>
+                  )}
+                  {cfg.fields.includes("gender") && (
+                    <div className="space-y-1">
+                      <Label>性别{q.is_required && <span className="text-destructive ml-1">*</span>}</Label>
+                      <RadioGroup value={data.gender ?? ""} onValueChange={(v) => update("gender", v)} className="flex gap-6">
+                        {[{ v: "male", l: "男" }, { v: "female", l: "女" }, { v: "other", l: "其他" }].map((o) => (
+                          <div key={o.v} className="flex items-center gap-2">
+                            <RadioGroupItem value={o.v} id={`pi-${q.id}-${o.v}`} />
+                            <Label htmlFor={`pi-${q.id}-${o.v}`} className="font-normal cursor-pointer">{o.l}</Label>
+                          </div>
+                        ))}
+                      </RadioGroup>
+                    </div>
+                  )}
+                  {cfg.fields.includes("birth_year") && (
+                    <div className="space-y-1">
+                      <Label>出生年份{q.is_required && <span className="text-destructive ml-1">*</span>}</Label>
+                      <Input type="number" placeholder="例：1990" min="1900" max="2020" value={data.birth_year ?? ""} onChange={(e) => update("birth_year", e.target.value)} className="max-w-xs" />
+                    </div>
+                  )}
+                  <div className="flex gap-3 pt-2">
+                    <Button variant="outline" className="rounded-full" onClick={handlePrevSegment}>上一步</Button>
+                    <Button className="flex-1 rounded-full" onClick={handleNextSegment}>下一步</Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
+
+          {step === 2 && !isSectionCoverSegment && !isPersonalInfoSegment && (
             <Card>
               <CardHeader>
-                <CardTitle>第 2 步：问卷评估</CardTitle>
+                <CardTitle>
+                  {currentPageIdx >= 0 && pageList.length > 0
+                    ? `第 ${currentPageIdx + 1} 步：${pageList[currentPageIdx].title}`
+                    : "第 2 步：问卷评估"}
+                </CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 {questions.length === 0 ? (

@@ -20,7 +20,7 @@ import {
 import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import SortableQuestion from "@/components/admin/SortableQuestion";
 
-type QType = "yes_no" | "single_choice" | "multiple_choice" | "text_input" | "dropdown" | "likert" | "text_display" | "section_cover";
+type QType = "yes_no" | "single_choice" | "multiple_choice" | "text_input" | "dropdown" | "likert" | "text_display" | "section_cover" | "consent" | "personal_info" | "pii_field" | "page_break";
 
 interface Option {
   id?: string;
@@ -47,6 +47,14 @@ interface Question {
   question_options: Option[];
 }
 
+const PERSONAL_INFO_FIELDS = [
+  { id: "name", label: "姓名" },
+  { id: "email", label: "邮箱" },
+  { id: "phone", label: "手机号码（含国际区号）" },
+  { id: "gender", label: "性别" },
+  { id: "birth_year", label: "出生年份" },
+];
+
 const YES_NO_OPTIONS: Option[] = [
   { label: "是", value: "yes", is_exclusion: false, allow_free_text: false, hint_title: "", hint_body: "", hint_button: "", sort_order: 1 },
   { label: "否", value: "no", is_exclusion: false, allow_free_text: false, hint_title: "", hint_body: "", hint_button: "", sort_order: 2 },
@@ -57,7 +65,7 @@ const QuestionnaireBuilder = () => {
   const [serviceName, setServiceName] = useState("");
   const [questionnaire, setQuestionnaire] = useState<{
     id: string; title: string; description: string | null; cover_image_url: string | null;
-    consent_enabled: boolean; consent_statement: string | null; consent_link_text: string | null; consent_body: string | null;
+    consent_enabled: boolean; consent_items: { statement: string; body: string }[];
   } | null>(null);
   const [uploadingCover, setUploadingCover] = useState(false);
   const coverInputRef = useRef<HTMLInputElement>(null);
@@ -67,9 +75,16 @@ const QuestionnaireBuilder = () => {
   const [showUnsplash, setShowUnsplash] = useState(false);
   const [previewPhoto, setPreviewPhoto] = useState<typeof unsplashResults[0] | null>(null);
   const [cropSrc, setCropSrc] = useState<string | null>(null);
+  const [cropTarget, setCropTarget] = useState<"questionnaire" | "section_cover">("questionnaire");
   const [crop, setCrop] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [croppedAreaPixels, setCroppedAreaPixels] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const [scUnsplashQuery, setScUnsplashQuery] = useState("");
+  const [scUnsplashResults, setScUnsplashResults] = useState<typeof unsplashResults>([]);
+  const [scUnsplashLoading, setScUnsplashLoading] = useState(false);
+  const [scShowUnsplash, setScShowUnsplash] = useState(false);
+  const [scPreviewPhoto, setScPreviewPhoto] = useState<typeof unsplashResults[0] | null>(null);
+  const scCoverInputRef = useRef<HTMLInputElement>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [editing, setEditing] = useState<Partial<Question> | null>(null);
 
@@ -88,7 +103,11 @@ const QuestionnaireBuilder = () => {
         .select().single();
       q = created!;
     }
-    setQuestionnaire(q as any);
+    const rawItems: { statement: string; body: string }[] = (q as any).consent_items ?? [];
+    const consentItems = rawItems.length === 0 && (q as any).consent_statement
+      ? [{ statement: (q as any).consent_statement ?? "", body: (q as any).consent_body ?? "" }]
+      : rawItems;
+    setQuestionnaire({ ...q, consent_items: consentItems } as any);
 
     const { data: qs } = await supabase
       .from("questions").select("*, question_options(*)").eq("questionnaire_id", q!.id).order("sort_order");
@@ -100,7 +119,7 @@ const QuestionnaireBuilder = () => {
   const saveQuestionnaireMeta = async () => {
     if (!questionnaire) return;
     const { error } = await supabase.from("questionnaires")
-      .update({ title: questionnaire.title, description: questionnaire.description, cover_image_url: questionnaire.cover_image_url, consent_enabled: questionnaire.consent_enabled, consent_statement: questionnaire.consent_statement, consent_link_text: questionnaire.consent_link_text, consent_body: questionnaire.consent_body })
+      .update({ title: questionnaire.title, description: questionnaire.description, cover_image_url: questionnaire.cover_image_url, consent_enabled: questionnaire.consent_enabled, consent_items: questionnaire.consent_items })
       .eq("id", questionnaire.id);
     if (error) return toast.error(error.message);
     toast.success("已保存");
@@ -109,10 +128,17 @@ const QuestionnaireBuilder = () => {
   const handleCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.[0]) return;
     const url = URL.createObjectURL(e.target.files[0]);
-    setCrop({ x: 0, y: 0 });
-    setZoom(1);
+    setCrop({ x: 0, y: 0 }); setZoom(1); setCropTarget("questionnaire");
     setCropSrc(url);
     if (coverInputRef.current) coverInputRef.current.value = "";
+  };
+
+  const handleScCoverUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.[0]) return;
+    const url = URL.createObjectURL(e.target.files[0]);
+    setCrop({ x: 0, y: 0 }); setZoom(1); setCropTarget("section_cover");
+    setCropSrc(url);
+    if (scCoverInputRef.current) scCoverInputRef.current.value = "";
   };
 
   const searchUnsplash = async () => {
@@ -142,10 +168,35 @@ const QuestionnaireBuilder = () => {
 
   const selectUnsplashPhoto = (photo: typeof unsplashResults[0]) => {
     fetch(`${photo.download_location}&client_id=${import.meta.env.VITE_UNSPLASH_ACCESS_KEY}`);
-    setPreviewPhoto(null);
-    setShowUnsplash(false);
-    setCrop({ x: 0, y: 0 });
-    setZoom(1);
+    setPreviewPhoto(null); setShowUnsplash(false);
+    setCrop({ x: 0, y: 0 }); setZoom(1); setCropTarget("questionnaire");
+    setCropSrc(photo.regular);
+  };
+
+  const searchScUnsplash = async () => {
+    if (!scUnsplashQuery.trim()) return;
+    setScUnsplashLoading(true);
+    try {
+      const key = import.meta.env.VITE_UNSPLASH_ACCESS_KEY;
+      if (!key) { toast.error("未找到 VITE_UNSPLASH_ACCESS_KEY，请检查 .env 文件"); setScUnsplashLoading(false); return; }
+      const res = await fetch(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(scUnsplashQuery)}&per_page=12&client_id=${key}`);
+      const json = await res.json();
+      if (!res.ok) { toast.error(`Unsplash 错误 ${res.status}：${json.errors?.[0] ?? res.statusText}`); setScUnsplashLoading(false); return; }
+      const results = (json.results ?? []).map((p: any) => ({
+        id: p.id, thumb: p.urls.small, regular: p.urls.regular,
+        download_location: p.links.download_location,
+        photographer: p.user.name, photographer_url: p.user.links.html,
+      }));
+      setScUnsplashResults(results);
+      if (results.length === 0) toast.info("没有找到相关图片，试试其他关键词");
+    } catch (e: any) { toast.error("Unsplash 搜索失败：" + e.message); }
+    setScUnsplashLoading(false);
+  };
+
+  const selectScUnsplashPhoto = (photo: typeof unsplashResults[0]) => {
+    fetch(`${photo.download_location}&client_id=${import.meta.env.VITE_UNSPLASH_ACCESS_KEY}`);
+    setScPreviewPhoto(null); setScShowUnsplash(false);
+    setCrop({ x: 0, y: 0 }); setZoom(1); setCropTarget("section_cover");
     setCropSrc(photo.regular);
   };
 
@@ -162,20 +213,31 @@ const QuestionnaireBuilder = () => {
       await new Promise<void>((res, rej) => { image.onload = () => res(); image.onerror = rej; image.src = cropSrc; });
       const canvas = document.createElement("canvas");
       const TARGET_W = 1400, TARGET_H = 280;
-      canvas.width = TARGET_W;
-      canvas.height = TARGET_H;
+      canvas.width = TARGET_W; canvas.height = TARGET_H;
       const ctx = canvas.getContext("2d")!;
       ctx.drawImage(image, croppedAreaPixels.x, croppedAreaPixels.y, croppedAreaPixels.width, croppedAreaPixels.height, 0, 0, TARGET_W, TARGET_H);
       const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => b ? res(b) : rej(), "image/jpeg", 0.92));
-      const path = `${questionnaire.id}/cover-${Date.now()}.jpg`;
-      const { error } = await supabase.storage.from("questionnaire-covers").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
-      if (error) throw error;
-      const { data: { publicUrl } } = supabase.storage.from("questionnaire-covers").getPublicUrl(path);
-      const updated = { ...questionnaire, cover_image_url: publicUrl };
-      setQuestionnaire(updated);
-      await supabase.from("questionnaires").update({ cover_image_url: publicUrl }).eq("id", questionnaire.id);
+      const ts = Date.now();
+      if (cropTarget === "section_cover") {
+        const path = `${questionnaire.id}/section-${ts}.jpg`;
+        const { error } = await supabase.storage.from("questionnaire-covers").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+        if (error) throw error;
+        const { data: { publicUrl } } = supabase.storage.from("questionnaire-covers").getPublicUrl(path);
+        setEditing((prev) => {
+          if (!prev) return prev;
+          const raw = (() => { try { return JSON.parse(prev.hint_text ?? "{}"); } catch { return {}; } })();
+          return { ...prev, hint_text: JSON.stringify({ ...raw, banner_url: publicUrl }) };
+        });
+      } else {
+        const path = `${questionnaire.id}/cover-${ts}.jpg`;
+        const { error } = await supabase.storage.from("questionnaire-covers").upload(path, blob, { upsert: true, contentType: "image/jpeg" });
+        if (error) throw error;
+        const { data: { publicUrl } } = supabase.storage.from("questionnaire-covers").getPublicUrl(path);
+        setQuestionnaire({ ...questionnaire, cover_image_url: publicUrl });
+        await supabase.from("questionnaires").update({ cover_image_url: publicUrl }).eq("id", questionnaire.id);
+      }
       setCropSrc(null);
-      toast.success("封面图已保存");
+      toast.success("图片已保存");
     } catch (e: any) {
       toast.error("保存失败：" + (e.message ?? e));
     }
@@ -211,8 +273,17 @@ const QuestionnaireBuilder = () => {
     } else if (v === "text_display") {
       setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ body: "", button_enabled: false, button_label: "" }), is_required: false, jump_logic: {} });
     } else if (v === "section_cover") {
-      setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ body: "", button_label: "" }), is_required: false, jump_logic: {} });
-    } else if (editing.type === "yes_no" || editing.type === "likert" || editing.type === "text_display" || editing.type === "section_cover") {
+      setScShowUnsplash(false); setScUnsplashResults([]); setScPreviewPhoto(null);
+      setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ banner_url: "", body: "", button_label: "" }), is_required: false, jump_logic: {} });
+    } else if (v === "consent") {
+      setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ statement: "", body: "" }), is_required: true, jump_logic: {} });
+    } else if (v === "personal_info") {
+      setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ fields: ["name", "email", "phone"] }), is_required: true, jump_logic: {} });
+    } else if (v === "pii_field") {
+      setEditing({ ...editing, type: v, question_options: [], hint_text: JSON.stringify({ field: "name" }), is_required: true, jump_logic: {} });
+    } else if (v === "page_break") {
+      setEditing({ ...editing, type: v, question_options: [], hint_text: null, is_required: false, jump_logic: {} });
+    } else if (editing.type === "yes_no" || editing.type === "likert" || editing.type === "text_display" || editing.type === "section_cover" || editing.type === "consent" || editing.type === "personal_info" || editing.type === "pii_field" || editing.type === "page_break") {
       setEditing({ ...editing, type: v, question_options: [], hint_text: null });
     } else {
       setEditing({ ...editing, type: v });
@@ -244,7 +315,7 @@ const QuestionnaireBuilder = () => {
 
   const saveQuestion = async () => {
     if (!editing || !questionnaire) return;
-    if (!editing.text?.trim()) return toast.error("请填写问题文本");
+    if (!editing.text?.trim() && !["consent", "personal_info", "page_break"].includes(editing.type ?? "")) return toast.error("请填写问题文本");
 
     const payload: any = {
       questionnaire_id: questionnaire.id,
@@ -298,8 +369,8 @@ const QuestionnaireBuilder = () => {
   };
 
   const isYesNo = editing?.type === "yes_no";
-  const showOptions = editing && !["text_input", "likert", "text_display", "section_cover"].includes(editing.type ?? "");
-  const showJumpLogic = editing && !["likert", "text_display", "section_cover"].includes(editing.type ?? "");
+  const showOptions = editing && !["text_input", "likert", "text_display", "section_cover", "consent", "personal_info", "pii_field", "page_break"].includes(editing.type ?? "");
+  const showJumpLogic = editing && !["likert", "text_display", "section_cover", "consent", "personal_info", "pii_field", "page_break"].includes(editing.type ?? "");
 
   return (
     <AdminLayout>
@@ -419,29 +490,56 @@ const QuestionnaireBuilder = () => {
                   checked={questionnaire.consent_enabled}
                   onCheckedChange={(c) => setQuestionnaire({ ...questionnaire, consent_enabled: c })}
                 />
-                <Label className="font-medium">启用知情同意</Label>
+                <Label className="font-medium">启用协议确认</Label>
               </div>
               {questionnaire.consent_enabled && (
-                <div className="space-y-3 pl-1">
-                  <div className="space-y-1">
-                    <Label className="text-xs">
-                      陈述文字 <span className="text-muted-foreground font-normal">— 选中文字后点「插入知情同意书链接」按钮</span>
-                    </Label>
-                    <RichTextEditor
-                      value={questionnaire.consent_statement ?? ""}
-                      onChange={(html) => setQuestionnaire({ ...questionnaire, consent_statement: html })}
-                      placeholder="例：我已阅读并同意《知情同意书》中的相关条款"
-                      showConsentLink
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">知情同意书正文（点击链接后展示）</Label>
-                    <RichTextEditor
-                      value={questionnaire.consent_body ?? ""}
-                      onChange={(html) => setQuestionnaire({ ...questionnaire, consent_body: html })}
-                      placeholder="在此输入完整的知情同意书内容..."
-                    />
-                  </div>
+                <div className="space-y-4 pl-1">
+                  {questionnaire.consent_items.map((item, i) => (
+                    <div key={i} className="space-y-3 rounded-md border p-3">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-sm font-medium">协议 {i + 1}</Label>
+                        <Button
+                          type="button" variant="ghost" size="sm"
+                          onClick={() => setQuestionnaire({ ...questionnaire, consent_items: questionnaire.consent_items.filter((_, idx) => idx !== i) })}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">
+                          陈述文字 <span className="text-muted-foreground font-normal">— 选中文字后点「插入协议链接」按钮</span>
+                        </Label>
+                        <RichTextEditor
+                          value={item.statement}
+                          onChange={(html) => {
+                            const next = [...questionnaire.consent_items];
+                            next[i] = { ...next[i], statement: html };
+                            setQuestionnaire({ ...questionnaire, consent_items: next });
+                          }}
+                          placeholder="例：我已阅读并同意《用户协议》中的相关条款"
+                          showConsentLink
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">协议正文（点击链接后展示）</Label>
+                        <RichTextEditor
+                          value={item.body}
+                          onChange={(html) => {
+                            const next = [...questionnaire.consent_items];
+                            next[i] = { ...next[i], body: html };
+                            setQuestionnaire({ ...questionnaire, consent_items: next });
+                          }}
+                          placeholder="在此输入完整协议内容..."
+                        />
+                      </div>
+                    </div>
+                  ))}
+                  <Button
+                    type="button" variant="outline" size="sm"
+                    onClick={() => setQuestionnaire({ ...questionnaire, consent_items: [...questionnaire.consent_items, { statement: "", body: "" }] })}
+                  >
+                    <Plus className="h-4 w-4 mr-1" /> 添加协议条款
+                  </Button>
                 </div>
               )}
             </div>
@@ -475,7 +573,7 @@ const QuestionnaireBuilder = () => {
         )}
       </div>
 
-      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
+      <Dialog open={!!editing} onOpenChange={(o) => { if (!o) { setEditing(null); setScShowUnsplash(false); setScUnsplashResults([]); setScPreviewPhoto(null); } }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{editing?.id ? "编辑问题" : "新建问题"}</DialogTitle>
@@ -483,7 +581,15 @@ const QuestionnaireBuilder = () => {
           {editing && (
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label>{editing.type === "text_display" ? "标题" : "问题文本 *"}</Label>
+                <Label>{
+                  editing.type === "text_display" ? "标题" :
+                  editing.type === "section_cover" ? "标题（必填）" :
+                  editing.type === "consent" ? "内部标签（仅管理员可见）" :
+                  editing.type === "personal_info" ? "分组标题（可选）" :
+                  editing.type === "pii_field" ? "字段标签（显示给用户）*" :
+                  editing.type === "page_break" ? "页面标题（显示在导航栏）" :
+                  "问题文本 *"
+                }</Label>
                 <Textarea rows={2} value={editing.text ?? ""} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
@@ -499,11 +605,15 @@ const QuestionnaireBuilder = () => {
                       <SelectItem value="text_input">文本输入</SelectItem>
                       <SelectItem value="likert">Likert 量表</SelectItem>
                       <SelectItem value="text_display">纯文本</SelectItem>
-                      <SelectItem value="section_cover">分页封面</SelectItem>
+                      {/* section_cover reserved for future assessment tools */}
+                      <SelectItem value="consent">用户协议</SelectItem>
+                      <SelectItem value="personal_info">基础信息（分组）</SelectItem>
+                      <SelectItem value="pii_field">单一信息字段</SelectItem>
+                      <SelectItem value="page_break">分页符</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
-                {editing.type !== "text_display" && (
+                {!["text_display", "section_cover", "consent", "personal_info", "page_break"].includes(editing.type ?? "") && (
                   <div className="flex items-center gap-2 pt-6">
                     <Switch checked={editing.is_required ?? true} onCheckedChange={(c) => setEditing({ ...editing, is_required: c })} />
                     <Label>必填</Label>
@@ -691,19 +801,97 @@ const QuestionnaireBuilder = () => {
 
               {editing?.type === "section_cover" && (() => {
                 const raw = (() => { try { return JSON.parse(editing.hint_text ?? "{}"); } catch { return {}; } })();
-                const cfg = { body: "", button_label: "", ...raw };
-                const setCfg = (patch: { body?: string; button_label?: string }) =>
+                const cfg = { banner_url: "", body: "", button_label: "", ...raw };
+                const setCfg = (patch: Partial<typeof cfg>) =>
                   editing && setEditing({ ...editing, hint_text: JSON.stringify({ ...cfg, ...patch }) });
                 return (
                   <div className="space-y-3 rounded-md border p-3">
+                    <div className="space-y-2">
+                      <Label className="text-xs">封面图 Banner</Label>
+                      {cfg.banner_url && (
+                        <div className="relative w-full overflow-hidden rounded-lg border">
+                          <img src={cfg.banner_url} alt="section banner" className="w-full object-cover" style={{ aspectRatio: "5/1" }} />
+                          <button
+                            type="button"
+                            className="absolute top-2 right-2 rounded-full bg-black/50 p-1 text-white hover:bg-black/70"
+                            onClick={() => setCfg({ banner_url: "" })}
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      )}
+                      <div className="flex gap-2 flex-wrap">
+                        <input ref={scCoverInputRef} type="file" accept="image/*" className="hidden" onChange={handleScCoverUpload} />
+                        <Button type="button" variant="outline" size="sm" disabled={uploadingCover} onClick={() => scCoverInputRef.current?.click()}>
+                          <ImagePlus className="h-4 w-4 mr-2" />
+                          {uploadingCover && cropTarget === "section_cover" ? "上传中..." : "上传图片"}
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" onClick={() => setScShowUnsplash((v) => !v)}>
+                          🔍 从 Unsplash 搜索
+                        </Button>
+                      </div>
+                      {scShowUnsplash && (
+                        <div className="space-y-3 rounded-lg border p-3 bg-muted/30">
+                          <div className="flex gap-2">
+                            <Input
+                              placeholder="搜索图片关键词，例如：nature, city..."
+                              value={scUnsplashQuery}
+                              onChange={(e) => setScUnsplashQuery(e.target.value)}
+                              onKeyDown={(e) => e.key === "Enter" && searchScUnsplash()}
+                              className="flex-1"
+                            />
+                            <Button type="button" size="sm" onClick={searchScUnsplash} disabled={scUnsplashLoading}>
+                              {scUnsplashLoading ? "搜索中..." : "搜索"}
+                            </Button>
+                          </div>
+                          {scUnsplashResults.length > 0 && (
+                            <>
+                              <div className="grid grid-cols-3 gap-2">
+                                {scUnsplashResults.map((photo) => (
+                                  <button
+                                    key={photo.id}
+                                    type="button"
+                                    className={`relative group overflow-hidden rounded-md border transition-all hover:ring-2 hover:ring-primary ${scPreviewPhoto?.id === photo.id ? "ring-2 ring-primary" : ""}`}
+                                    onClick={() => setScPreviewPhoto(scPreviewPhoto?.id === photo.id ? null : photo)}
+                                  >
+                                    <img src={photo.thumb} alt={photo.photographer} className="w-full h-20 object-cover" />
+                                    <div className="absolute inset-x-0 bottom-0 bg-black/60 px-1 py-0.5 text-white text-[10px] truncate opacity-0 group-hover:opacity-100 transition-opacity">
+                                      {photo.photographer}
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                              {scPreviewPhoto && (
+                                <div className="rounded-lg border overflow-hidden bg-background shadow-md">
+                                  <img src={scPreviewPhoto.regular} alt={scPreviewPhoto.photographer} className="w-full object-cover max-h-48" />
+                                  <div className="flex items-center justify-between px-3 py-2">
+                                    <a
+                                      href={`${scPreviewPhoto.photographer_url}?utm_source=sparks&utm_medium=referral`}
+                                      target="_blank" rel="noreferrer"
+                                      className="text-xs text-muted-foreground hover:text-foreground truncate"
+                                    >
+                                      📷 {scPreviewPhoto.photographer} / Unsplash
+                                    </a>
+                                    <Button size="sm" className="ml-3 shrink-0 rounded-full" onClick={() => selectScUnsplashPhoto(scPreviewPhoto)}>
+                                      使用这张
+                                    </Button>
+                                  </div>
+                                </div>
+                              )}
+                            </>
+                          )}
+                          <p className="text-[10px] text-muted-foreground">
+                            Photos from <a href="https://unsplash.com" target="_blank" rel="noreferrer" className="underline">Unsplash</a>
+                          </p>
+                        </div>
+                      )}
+                    </div>
                     <div className="space-y-1">
-                      <Label className="text-xs">正文（支持 HTML）</Label>
-                      <Textarea
-                        rows={6}
-                        placeholder={"例如：<p>这是本节的介绍</p>"}
+                      <Label className="text-xs">正文</Label>
+                      <RichTextEditor
                         value={cfg.body}
-                        onChange={(e) => setCfg({ body: e.target.value })}
-                        className="font-mono text-xs"
+                        onChange={(html) => setCfg({ body: html })}
+                        placeholder="在这里输入分页封面正文内容..."
                       />
                     </div>
                     <div className="space-y-1">
@@ -713,6 +901,102 @@ const QuestionnaireBuilder = () => {
                         value={cfg.button_label}
                         onChange={(e) => setCfg({ button_label: e.target.value })}
                       />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {editing?.type === "consent" && (() => {
+                const raw = (() => { try { return JSON.parse(editing.hint_text ?? "{}"); } catch { return {}; } })();
+                const cfg = { statement: "", body: "", ...raw };
+                const setCfg = (patch: Partial<typeof cfg>) =>
+                  editing && setEditing({ ...editing, hint_text: JSON.stringify({ ...cfg, ...patch }) });
+                return (
+                  <div className="space-y-3 rounded-md border p-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs">
+                        陈述文字 <span className="text-muted-foreground font-normal">— 选中文字后点「插入知情同意书链接」按钮</span>
+                      </Label>
+                      <RichTextEditor
+                        value={cfg.statement}
+                        onChange={(html) => setCfg({ statement: html })}
+                        placeholder="例：我已阅读并同意《知情同意书》中的相关条款"
+                        showConsentLink
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">知情同意书正文（点击链接后展示）</Label>
+                      <RichTextEditor
+                        value={cfg.body}
+                        onChange={(html) => setCfg({ body: html })}
+                        placeholder="在此输入完整的知情同意书内容..."
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {editing?.type === "personal_info" && (() => {
+                let cfg: { fields: string[]; page_break: boolean; page_break_title: string } =
+                  { fields: ["name", "email", "phone"], page_break: false, page_break_title: "" };
+                try { cfg = { ...cfg, ...JSON.parse(editing.hint_text ?? "{}") }; } catch {}
+                const setCfg = (patch: Partial<typeof cfg>) =>
+                  editing && setEditing({ ...editing, hint_text: JSON.stringify({ ...cfg, ...patch }) });
+                return (
+                  <div className="space-y-3 rounded-md border p-3">
+                    <Label className="text-xs">包含字段</Label>
+                    <div className="space-y-2">
+                      {PERSONAL_INFO_FIELDS.map((f) => (
+                        <div key={f.id} className="flex items-center gap-2">
+                          <Switch
+                            checked={cfg.fields.includes(f.id)}
+                            onCheckedChange={(c) => {
+                              const fields = c ? [...cfg.fields, f.id] : cfg.fields.filter((x) => x !== f.id);
+                              setCfg({ fields });
+                            }}
+                          />
+                          <Label className="font-normal text-sm">{f.label}</Label>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="border-t pt-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <Switch checked={cfg.page_break} onCheckedChange={(c) => setCfg({ page_break: c })} />
+                        <Label className="font-normal text-sm">自带分页（在导航栏单独显示为一页）</Label>
+                      </div>
+                      {cfg.page_break && (
+                        <div className="space-y-1 pl-10">
+                          <Label className="text-xs">导航栏页面标题</Label>
+                          <Input
+                            placeholder="例：个人信息"
+                            value={cfg.page_break_title}
+                            onChange={(e) => setCfg({ page_break_title: e.target.value })}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {editing?.type === "pii_field" && (() => {
+                let cfg = { field: "name" };
+                try { cfg = { ...cfg, ...JSON.parse(editing.hint_text ?? "{}") }; } catch {}
+                return (
+                  <div className="space-y-3 rounded-md border p-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs">字段类型</Label>
+                      <Select
+                        value={cfg.field}
+                        onValueChange={(v) => editing && setEditing({ ...editing, hint_text: JSON.stringify({ field: v }) })}
+                      >
+                        <SelectTrigger className="max-w-sm"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {PERSONAL_INFO_FIELDS.map((f) => (
+                            <SelectItem key={f.id} value={f.id}>{f.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
                 );

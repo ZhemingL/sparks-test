@@ -149,12 +149,12 @@ const RichTextEditor = ({ value, onChange, placeholder, showConsentLink }: Props
                   if (editor.state.selection.empty) return;
                   editor.chain().focus().setLink({ href: "#consent-doc" }).run();
                 }}
-                title="将选中文字设为知情同意书链接"
+                title="将选中文字设为协议链接"
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs bg-primary/10 text-primary hover:bg-primary/20 transition-colors disabled:opacity-40"
                 disabled={editor.state.selection.empty}
               >
                 <Link2 className="h-3.5 w-3.5" />
-                插入知情同意书链接
+                插入协议链接
               </button>
             )}
           </>
